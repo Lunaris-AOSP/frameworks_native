@@ -160,8 +160,9 @@ public:
         Gaussian,
         Kawase,
         KawaseDualFilterV2,
+        KawaseDarkmoon,
 
-        ftl_last = KawaseDualFilterV2
+        ftl_last = KawaseDarkmoon
     };
 
     static std::unique_ptr<RenderEngine> create(const RenderEngineCreationArgs& args);

@@ -332,8 +332,10 @@ LayerInfo::RefreshRateVotes LayerInfo::getRefreshRateVote(nsecs_t now) {
             const auto voteType = mLayerVote.type == LayerHistory::LayerVoteType::NoVote
                     ? LayerHistory::LayerVoteType::NoVote
                     : LayerHistory::LayerVoteType::ExplicitCategory;
-            SFTRACE_FORMAT_INSTANT("Vote %s (category=%s)", ftl::enum_string(voteType).c_str(),
-                                   ftl::enum_string(mLayerVote.category).c_str());
+            if (CC_UNLIKELY(SFTRACE_ENABLED())) {
+                SFTRACE_FORMAT_INSTANT("Vote %s (category=%s)", ftl::enum_string(voteType).c_str(),
+                                       ftl::enum_string(mLayerVote.category).c_str());
+            }
             ALOGV("%s voted %s with category: %s", mName.c_str(),
                   ftl::enum_string(voteType).c_str(),
                   ftl::enum_string(mLayerVote.category).c_str());
@@ -343,7 +345,9 @@ LayerInfo::RefreshRateVotes LayerInfo::getRefreshRateVote(nsecs_t now) {
 
         if (mLayerVote.fps.isValid() ||
             mLayerVote.type != LayerHistory::LayerVoteType::ExplicitDefault) {
-            SFTRACE_FORMAT_INSTANT("Vote %s", ftl::enum_string(mLayerVote.type).c_str());
+            if (CC_UNLIKELY(SFTRACE_ENABLED())) {
+                SFTRACE_FORMAT_INSTANT("Vote %s", ftl::enum_string(mLayerVote.type).c_str());
+            }
             ALOGV("%s voted %d", mName.c_str(), static_cast<int>(mLayerVote.type));
             votes.push_back({mLayerVote.type, mLayerVote.fps, mLayerVote.seamlessness,
                              FrameRateCategory::Default, mLayerVote.categorySmoothSwitchOnly});
@@ -397,7 +401,9 @@ LayerInfo::RefreshRateVotes LayerInfo::getRefreshRateVote(nsecs_t now) {
 
     auto refreshRate = calculateRefreshRateIfPossible(now);
     if (refreshRate.has_value()) {
-        SFTRACE_FORMAT_INSTANT("calculated (%s)", to_string(*refreshRate).c_str());
+        if (CC_UNLIKELY(SFTRACE_ENABLED())) {
+            SFTRACE_FORMAT_INSTANT("calculated (%s)", to_string(*refreshRate).c_str());
+        }
         ALOGV("%s calculated refresh rate: %s", mName.c_str(), to_string(*refreshRate).c_str());
         votes.push_back({LayerHistory::LayerVoteType::Heuristic, refreshRate.value()});
         return votes;

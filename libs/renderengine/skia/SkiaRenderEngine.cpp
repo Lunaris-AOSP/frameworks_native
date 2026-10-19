@@ -52,6 +52,8 @@
 #include <android-base/stringprintf.h>
 #include <common/FlagManager.h>
 #include <common/trace.h>
+#include <ftl/small_map.h>
+#include <ftl/small_vector.h>
 #include <gui/FenceMonitor.h>
 #include <include/gpu/ganesh/GrBackendSemaphore.h>
 #include <include/gpu/ganesh/GrContextOptions.h>
@@ -78,7 +80,6 @@
 #include "filters/BlurFilter.h"
 #include "filters/GainmapFactory.h"
 #include "filters/GaussianBlurFilter.h"
-#include "filters/KawaseBlurDualFilter.h"
 #include "filters/KawaseBlurDualFilterV2.h"
 #include "filters/KawaseBlurFilter.h"
 #include "filters/LutShader.h"
@@ -142,10 +143,10 @@ static bool intersectionIsRoundRect(const SkRect& bounds, const SkRect& crop,
     // In particular the round rect implementation will scale the value of all corner radii
     // if the sum of the radius along any edge is greater than the length of that edge.
     // See https://www.w3.org/TR/css-backgrounds-3/#corner-overlap
-    const bool requiredWidth = bounds.width() > (cornerRadii.topLeft.x + cornerRadii.topRight.x) ||
+    const bool requiredWidth = bounds.width() > (cornerRadii.topLeft.x + cornerRadii.topRight.x) &&
             bounds.width() > (cornerRadii.bottomLeft.x + cornerRadii.bottomRight.x);
     const bool requiredHeight =
-            bounds.height() > (cornerRadii.topLeft.y + cornerRadii.bottomLeft.y) ||
+            bounds.height() > (cornerRadii.topLeft.y + cornerRadii.bottomLeft.y) &&
             bounds.height() > (cornerRadii.topRight.y + cornerRadii.bottomRight.y);
     if (!requiredWidth || !requiredHeight) {
         return false;
@@ -216,9 +217,9 @@ static inline std::pair<SkRRect, SkRRect> getBoundsAndClip(
         // converting them to a single RRect draw. It is possible there are other cases
         // that can be converted.
         if (crop.contains(bounds)) {
-            float dx = std::min({cornerRadii.topLeft.x, cornerRadii.topRight.x,
+            float dx = std::max({cornerRadii.topLeft.x, cornerRadii.topRight.x,
                                  cornerRadii.bottomLeft.x, cornerRadii.bottomRight.x});
-            float dy = std::min({cornerRadii.topLeft.y, cornerRadii.topRight.y,
+            float dy = std::max({cornerRadii.topLeft.y, cornerRadii.topRight.y,
                                  cornerRadii.bottomLeft.y, cornerRadii.bottomRight.y});
             const auto insetCrop = crop.makeInset(dx, dy);
             if (insetCrop.contains(bounds)) {
@@ -341,14 +342,9 @@ SkiaRenderEngine::SkiaRenderEngine(Threaded threaded, PixelFormat pixelFormat,
             mBlurFilter = new KawaseBlurFilter(mRuntimeEffectManager);
             break;
         }
-        case BlurAlgorithm::KawaseDualFilter: {
-            ALOGD("Background Blurs Enabled (Kawase dual-filtering algorithm)");
-            mBlurFilter = new KawaseBlurDualFilter(mRuntimeEffectManager);
-            break;
-        }
         case BlurAlgorithm::KawaseDualFilterV2: {
             ALOGD("Background Blurs Enabled (Kawase dual-filtering V2 algorithm)");
-            mBlurFilter = new KawaseBlurDualFilterV2(mRuntimeEffectManager);
+            mBlurFilter = new KawaseBlurDualFilterV2(mRuntimeEffectManager, mTextureCleanupMgr);
             break;
         }
     }
@@ -847,11 +843,13 @@ void SkiaRenderEngine::drawLayersInternal(
     const LayerSettings* blurCompositionLayer = nullptr;
     if (mBlurFilter) {
         bool requiresCompositionLayer = false;
+        bool hasBlur = false;
         for (const auto& layer : layers) {
             // if the layer doesn't have blur or it is not visible then continue
             if (!layerHasBlur(layer, ctModifiesAlpha)) {
                 continue;
             }
+            hasBlur = true;
             if (layer.backgroundBlurRadius > 0 &&
                 layer.backgroundBlurRadius < mBlurFilter->getMaxCrossFadeRadius()) {
                 requiresCompositionLayer = true;
@@ -867,6 +865,18 @@ void SkiaRenderEngine::drawLayersInternal(
                 blurCompositionLayer = &layer;
                 break;
             }
+        }
+        if (FlagManager::getInstance().window_blur_kawase2_preallocate_buffers() && hasBlur &&
+            !display.physicalDisplay.isEmpty() &&
+            !mBlurFilter->areBuffersPreallocated(getActiveContext(),
+                                                 display.physicalDisplay.getSize())) {
+            ALOGE("Allocating %s blur surfaces during draw! Preallocation failed, or destination "
+                  "size (%dx%d) is bigger than the preallocated size from the last active display "
+                  "size change",
+                  isProtected() ? "protected" : "unprotected",
+                  display.physicalDisplay.getSize().width,
+                  display.physicalDisplay.getSize().height);
+            mBlurFilter->preallocateBuffers(getActiveContext(), display.physicalDisplay.getSize());
         }
     }
 
@@ -958,8 +968,6 @@ void SkiaRenderEngine::drawLayersInternal(
                 getBoundsAndClip(layer.geometry.boundaries, layer.geometry.roundedCornersCrop,
                                  layer.geometry.roundedCornersRadii);
         if (mBlurFilter && layerHasBlur(layer, ctModifiesAlpha)) {
-            std::unordered_map<uint32_t, sk_sp<SkImage>> cachedBlurs;
-
             // rect to be blurred in the coordinate space of blurInput
             SkRect blurRect = canvas->getTotalMatrix().mapRect(bounds.rect());
 
@@ -1010,30 +1018,73 @@ void SkiaRenderEngine::drawLayersInternal(
                     }
                 }
 
+                sk_sp<SkImage> temporaryBlurredImage = nullptr; // Might be reused by blur regions.
                 if (layer.backgroundBlurRadius > 0) {
                     SFTRACE_NAME("BackgroundBlur");
-                    auto blurredImage = mBlurFilter->generate(context, layer.backgroundBlurRadius,
-                                                              blurInput, blurRect);
-
-                    cachedBlurs[layer.backgroundBlurRadius] = blurredImage;
+                    // Result is only valid until the next call to generateTemporaryImage (for a
+                    // given BlurFilter). Safe to invalidate after all desired drawBlurRegion
+                    // invocations have been made for a particular blurred SkImage.
+                    temporaryBlurredImage =
+                            mBlurFilter->generateTemporaryImage(context, display,
+                                                                layer.backgroundBlurRadius,
+                                                                blurInput, blurRect);
 
                     mBlurFilter->drawBlurRegion(canvas, bounds, layer.backgroundBlurRadius,
-                                                layer.backgroundBlurScale, 1.0f,
-                                                blurRect, blurredImage, blurInput);
+                                                layer.backgroundBlurScale, 1.0f, blurRect,
+                                                temporaryBlurredImage, blurInput);
                 }
 
-                canvas->concat(getSkM44(layer.blurRegionTransform).asM33());
-                for (auto region : layer.blurRegions) {
-                    if (cachedBlurs[region.blurRadius] == nullptr) {
-                        SFTRACE_NAME("BlurRegion");
-                        cachedBlurs[region.blurRadius] =
-                                mBlurFilter->generate(context, region.blurRadius, blurInput,
-                                                      blurRect);
+                if (layer.blurRegions.size()) {
+                    SkAutoCanvasRestore acr(canvas, true);
+                    canvas->concat(getSkM44(layer.blurRegionTransform).asM33());
+
+                    // Clustering regions by blur radius allows regions with a shared blur radius to
+                    // reuse the same result from generateTemporaryImage(...). The exact order does
+                    // not matter. Initial sizes for ftl stack-first collections were chosen
+                    // semi-arbitrarily.
+                    using BlurRegionList = ftl::SmallVector<BlurRegion, 4>;
+                    ftl::SmallMap<uint32_t, BlurRegionList, 2> regionsPerRadius;
+                    for (const BlurRegion& region : layer.blurRegions) {
+                        if (region.blurRadius > 0) {
+                            const auto& [entry, _] = regionsPerRadius.try_emplace(region.blurRadius,
+                                                                                  BlurRegionList());
+                            entry->second.push_back(region);
+                        }
                     }
 
-                    mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region), region.blurRadius,
-                                                1.0f, region.alpha, blurRect,
-                                                cachedBlurs[region.blurRadius], blurInput);
+                    const auto drawRegion =
+                            [this, canvas, &blurRect,
+                             &blurInput](const sk_sp<SkImage>& temporaryBlurredImage,
+                                         const BlurRegion& region) {
+                                mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region),
+                                                            region.blurRadius, 1.0f, region.alpha,
+                                                            blurRect, temporaryBlurredImage,
+                                                            blurInput);
+                            };
+
+                    // Reuse existing temporaryBlurredImage from background blur for any regions
+                    // with the same blur radius.
+                    if (temporaryBlurredImage != nullptr &&
+                        regionsPerRadius.contains(layer.backgroundBlurRadius)) {
+                        for (const BlurRegion& region :
+                             regionsPerRadius.get(layer.backgroundBlurRadius)->get()) {
+                            drawRegion(temporaryBlurredImage, region);
+                        }
+                        regionsPerRadius.erase(layer.backgroundBlurRadius);
+                    }
+
+                    // Draw remaining regions for each blur radius.
+                    for (const auto& [radius, regions] : regionsPerRadius) {
+                        {
+                            SFTRACE_NAME("BlurRegion");
+                            temporaryBlurredImage =
+                                    mBlurFilter->generateTemporaryImage(context, display, radius,
+                                                                        blurInput, blurRect);
+                        }
+                        for (const BlurRegion& region : regions) {
+                            drawRegion(temporaryBlurredImage, region);
+                        }
+                    }
                 }
             }
         }
@@ -1101,8 +1152,8 @@ void SkiaRenderEngine::drawLayersInternal(
                         (!layer.source.buffer.buffer || layer.source.buffer.isOpaque) &&
                         layer.alpha == 1.0f;
                 mBoxShadowUtils.drawBoxShadows(canvas, preferredOriginalBounds.rect(), cornerRadius,
-                                               layer.boxShadowSettings,
-                                               opaqueContent && supportsForwardPixelKill());
+                                               layer.boxShadowSettings, supportsForwardPixelKill(),
+                                               opaqueContent);
             }
 
             // Similar to shadows, do the rendering before the clip is applied because even when the
@@ -1534,15 +1585,23 @@ void SkiaRenderEngine::onActiveDisplaySizeChanged(ui::Size size) {
     const float SURFACE_SIZE_MULTIPLIER = 3.5f * bytesPerPixel(mDefaultPixelFormat);
     const int maxResourceBytes = size.width * size.height * SURFACE_SIZE_MULTIPLIER;
 
-    // start by resizing the current context
-    getActiveContext()->setResourceCacheLimit(maxResourceBytes);
+    // A display can disappear during teardown. Preserve the previous budget in that case.
+    if (size.isEmpty()) return;
 
-    // if it is possible to switch contexts then we will resize the other context
+    const auto updateContext = [&] {
+        auto* context = getActiveContext();
+        context->setResourceCacheLimit(maxResourceBytes);
+        if (FlagManager::getInstance().window_blur_kawase2_preallocate_buffers() && mBlurFilter &&
+            !mBlurFilter->areBuffersPreallocated(context, size)) {
+            mBlurFilter->preallocateBuffers(context, size);
+        }
+    };
+    updateContext();
+
     const bool originalProtectedState = mInProtectedContext;
     useProtectedContext(!mInProtectedContext);
     if (mInProtectedContext != originalProtectedState) {
-        getActiveContext()->setResourceCacheLimit(maxResourceBytes);
-        // reset back to the initial context that was active when this method was called
+        updateContext();
         useProtectedContext(originalProtectedState);
     }
 }

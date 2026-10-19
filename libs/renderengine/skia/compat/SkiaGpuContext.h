@@ -23,6 +23,7 @@
 #include <include/gpu/graphite/Context.h>
 #include <include/gpu/vk/VulkanBackendContext.h>
 
+#include <renderengine/RenderEngine.h>
 #include "SkiaBackendTexture.h"
 
 #include <log/log.h>
@@ -96,6 +97,9 @@ public:
      * - AA is always enabled.
      */
     virtual sk_sp<SkSurface> createRenderTarget(SkImageInfo imageInfo) = 0;
+
+    virtual RenderEngine::SkiaBackend getBackend_onlyUseForCriticalWorkarounds() const = 0;
+    virtual bool supportsProtectedContent() const = 0;
 
     virtual bool isAbandonedOrDeviceLost() = 0;
     virtual size_t getMaxRenderTargetSize() const = 0;

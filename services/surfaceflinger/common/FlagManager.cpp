@@ -187,8 +187,7 @@ void FlagManager::dump(std::string& result) const {
     DUMP_ACONFIG_FLAG(use_known_refresh_rate_for_fps_consistency);
     DUMP_ACONFIG_FLAG(vulkan_renderengine);
     DUMP_ACONFIG_FLAG(wb_virtualdisplay2);
-    DUMP_ACONFIG_FLAG(window_blur_kawase2);
-    DUMP_ACONFIG_FLAG(window_blur_kawase2_fix_aliasing);
+    DUMP_ACONFIG_FLAG(window_blur_kawase2_preallocate_buffers);
     /// IMPORTANT - please keep alphabetize to reduce merge conflicts
 
 #undef DUMP_ACONFIG_FLAG
@@ -302,8 +301,15 @@ FLAG_MANAGER_ACONFIG_FLAG(true_hdr_screenshots, "debug.sf.true_hdr_screenshots")
 FLAG_MANAGER_ACONFIG_FLAG(use_known_refresh_rate_for_fps_consistency, "")
 FLAG_MANAGER_ACONFIG_FLAG(vulkan_renderengine, "debug.renderengine.vulkan")
 FLAG_MANAGER_ACONFIG_FLAG(wb_virtualdisplay2, "");
-FLAG_MANAGER_ACONFIG_FLAG(window_blur_kawase2, "");
-FLAG_MANAGER_ACONFIG_FLAG(window_blur_kawase2_fix_aliasing, "");
+bool FlagManager::window_blur_kawase2_preallocate_buffers() const {
+    if (mUnitTestMode) {
+        return flags::window_blur_kawase2_preallocate_buffers();
+    }
+    // Android 16 release configurations do not contain this Android 17 flag.
+    static const bool enabled =
+            base::GetBoolProperty("debug.renderengine.preallocate_blur_buffers", true);
+    return enabled;
+}
 
 /// Trunk stable server (R/W) flags ///
 /// IMPORTANT - please keep alphabetized to reduce merge conflicts

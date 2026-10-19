@@ -73,14 +73,15 @@ public:
     virtual renderengine::RenderEngine::GraphicsApi graphicsApi() = 0;
     virtual renderengine::RenderEngine::SkiaBackend skiaBackend() = 0;
     bool apiSupported() { return renderengine::RenderEngine::canSupport(graphicsApi()); }
-    std::unique_ptr<renderengine::RenderEngine> createRenderEngine() {
+    std::unique_ptr<renderengine::RenderEngine> createRenderEngine(
+            RenderEngine::BlurAlgorithm blurAlgorithm = RenderEngine::BlurAlgorithm::Kawase) {
         renderengine::RenderEngineCreationArgs reCreationArgs =
                 renderengine::RenderEngineCreationArgs::Builder()
                         .setPixelFormat(static_cast<int>(ui::PixelFormat::RGBA_8888))
                         .setImageCacheSize(1)
                         .setEnableProtectedContext(false)
                         .setPrecacheToneMapperShaderOnly(false)
-                        .setBlurAlgorithm(renderengine::RenderEngine::BlurAlgorithm::Kawase)
+                        .setBlurAlgorithm(blurAlgorithm)
                         .setContextPriority(renderengine::RenderEngine::ContextPriority::Medium)
                         .setThreaded(renderengine::RenderEngine::Threaded::No)
                         .setGraphicsApi(graphicsApi())
@@ -600,15 +601,16 @@ public:
     void drawShadowWithoutCaster(const FloatRect& castingBounds, const ShadowSettings& shadow,
                                  const ubyte4& backgroundColor);
 
-    void initializeRenderEngine();
+    void initializeRenderEngine(
+            RenderEngine::BlurAlgorithm blurAlgorithm = RenderEngine::BlurAlgorithm::Kawase);
 
     std::unique_ptr<renderengine::RenderEngine> mRE;
     std::shared_ptr<renderengine::ExternalTexture> mBuffer;
 };
 
-void RenderEngineTest::initializeRenderEngine() {
+void RenderEngineTest::initializeRenderEngine(RenderEngine::BlurAlgorithm blurAlgorithm) {
     const auto& renderEngineFactory = GetParam();
-    mRE = renderEngineFactory->createRenderEngine();
+    mRE = renderEngineFactory->createRenderEngine(blurAlgorithm);
     mBuffer = allocateDefaultBuffer();
 }
 
@@ -1763,6 +1765,85 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformZeroLayerAlpha_opaqu
     }
     initializeRenderEngine();
     fillBufferColorTransformZeroLayerAlpha<BufferSourceVariant<ForceOpaqueBufferVariant>>();
+}
+
+TEST_P(RenderEngineTest, drawLayers_kawaseV2BackgroundBlur) {
+    if (!GetParam()->apiSupported()) GTEST_SKIP();
+    initializeRenderEngine(RenderEngine::BlurAlgorithm::KawaseDualFilterV2);
+    fillBufferAndBlurBackground<BufferSourceVariant<ForceOpaqueBufferVariant>>();
+}
+
+TEST_P(RenderEngineTest, drawLayers_kawaseV2OnePixelBlurAfterPreallocation) {
+    if (!GetParam()->apiSupported()) GTEST_SKIP();
+    initializeRenderEngine(RenderEngine::BlurAlgorithm::KawaseDualFilterV2);
+    mRE->onActiveDisplaySizeChanged(ui::Size(DEFAULT_DISPLAY_WIDTH, DEFAULT_DISPLAY_HEIGHT));
+    // Exercises the 0.5001-texel clamp when the blur input is only one pixel wide.
+    fillSmallLayerAndBlurBackground<BufferSourceVariant<ForceOpaqueBufferVariant>>();
+}
+
+TEST_P(RenderEngineTest, drawLayers_kawaseV2RegionsMatchSeparateDraws) {
+    if (!GetParam()->apiSupported()) GTEST_SKIP();
+    initializeRenderEngine(RenderEngine::BlurAlgorithm::KawaseDualFilterV2);
+    mRE->onActiveDisplaySizeChanged(ui::Size(DEFAULT_DISPLAY_WIDTH, DEFAULT_DISPLAY_HEIGHT));
+
+    DisplaySettings display;
+    display.physicalDisplay = fullscreenRect();
+    display.clip = fullscreenRect();
+    display.outputDataspace = ui::Dataspace::V0_SRGB_LINEAR;
+
+    LayerSettings background;
+    background.geometry.boundaries = fullscreenRect().toFloatRect();
+    background.sourceDataspace = ui::Dataspace::V0_SRGB_LINEAR;
+    background.source.solidColor = half3(0, 1, 0);
+    background.alpha = 1.0f;
+    LayerSettings left = background;
+    left.geometry.boundaries =
+            Rect(DEFAULT_DISPLAY_WIDTH / 2, DEFAULT_DISPLAY_HEIGHT).toFloatRect();
+    left.source.solidColor = half3(1, 0, 0);
+
+    LayerSettings blur;
+    blur.geometry.boundaries = fullscreenRect().toFloatRect();
+    blur.skipContentDraw = true;
+    blur.alpha = 1.0f;
+    blur.backgroundBlurRadius = 8;
+    const uint32_t radii[] = {8, 60, 8, 0};
+    std::vector<BlurRegion> regions;
+    for (int i = 0; i < 4; i++) {
+        BlurRegion region{};
+        region.blurRadius = radii[i];
+        region.alpha = 1.0f;
+        region.top = i * DEFAULT_DISPLAY_HEIGHT / 4;
+        region.bottom = (i + 1) * DEFAULT_DISPLAY_HEIGHT / 4;
+        region.right = DEFAULT_DISPLAY_WIDTH;
+        regions.push_back(region);
+    }
+
+    // Draw each radius alone to obtain a reference without sharing intermediate textures.
+    std::vector<ubyte4> expected(DEFAULT_DISPLAY_WIDTH * DEFAULT_DISPLAY_HEIGHT);
+    for (const auto& region : regions) {
+        blur.blurRegions = {region};
+        invokeDraw(display, {background, left, blur});
+        ASSERT_FALSE(HasFatalFailure());
+        uint8_t* pixels = nullptr;
+        ASSERT_EQ(NO_ERROR,
+                  mBuffer->getBuffer()->lock(GRALLOC_USAGE_SW_READ_OFTEN,
+                                             reinterpret_cast<void**>(&pixels)));
+        for (int y = region.top; y < region.bottom; y++) {
+            for (int x = 0; x < DEFAULT_DISPLAY_WIDTH; x++) {
+                const uint8_t* p = pixels + 4 * (y * mBuffer->getBuffer()->getStride() + x);
+                expected[y * DEFAULT_DISPLAY_WIDTH + x] = ubyte4(p[0], p[1], p[2], p[3]);
+            }
+        }
+        mBuffer->getBuffer()->unlock();
+    }
+
+    // Shared background/region radius, repeated radius, a different radius and radius zero.
+    blur.blurRegions = regions;
+    invokeDraw(display, {background, left, blur});
+    ASSERT_FALSE(HasFatalFailure());
+    expectBufferColor(
+            fullscreenRect(), [&](Point p) { return expected[p.y * DEFAULT_DISPLAY_WIDTH + p.x]; },
+            1);
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferAndBlurBackground_opaqueBufferSource) {

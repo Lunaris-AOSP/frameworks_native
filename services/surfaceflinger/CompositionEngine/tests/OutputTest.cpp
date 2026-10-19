@@ -35,6 +35,7 @@
 #include <flag_macros.h>
 #include <ftl/future.h>
 #include <gtest/gtest.h>
+#include <gui/LayerState.h>
 #include <renderengine/ExternalTexture.h>
 #include <renderengine/impl/ExternalTexture.h>
 #include <renderengine/mock/FakeExternalTexture.h>
@@ -1633,6 +1634,44 @@ const Region OutputEnsureOutputLayerIfVisibleTest::kTransparentRegionHintNegativ
         Region(Rect(INT32_MIN, INT32_MIN, INT32_MIN + 100, INT32_MIN + 200));
 const Region OutputEnsureOutputLayerIfVisibleTest::kTransparentRegionHintNegativeIntersectsBounds =
         Region(Rect(INT32_MIN, INT32_MIN, 100, 100));
+
+TEST_F(OutputEnsureOutputLayerIfVisibleTest, allowsTenUnprivilegedBlurRequests) {
+    mLayer.layerFEState.backgroundBlurRadius = 30;
+    mLayer.layerFEState.blurRegions.resize(9);
+    EXPECT_CALL(mOutput, ensureOutputLayer(Eq(0u), Eq(mLayer.layerFE)))
+            .WillOnce(Return(&mLayer.outputLayer));
+
+    ensureOutputLayerIfVisible();
+
+    EXPECT_EQ(10, mCoverageState.aboveBlurRequests);
+    EXPECT_FALSE(mLayer.outputLayerState.ignoreBlur);
+}
+
+TEST_F(OutputEnsureOutputLayerIfVisibleTest, limitsEachUnprivilegedBlurRegion) {
+    mLayer.layerFEState.backgroundBlurRadius = 30;
+    mLayer.layerFEState.blurRegions.resize(10);
+    EXPECT_CALL(mOutput, ensureOutputLayer(Eq(0u), Eq(mLayer.layerFE)))
+            .WillOnce(Return(&mLayer.outputLayer));
+
+    ensureOutputLayerIfVisible();
+
+    EXPECT_EQ(11, mCoverageState.aboveBlurRequests);
+    EXPECT_TRUE(mLayer.outputLayerState.ignoreBlur);
+}
+
+TEST_F(OutputEnsureOutputLayerIfVisibleTest, privilegedBlurSurvivesExhaustedAppBudget) {
+    mCoverageState.aboveBlurRequests = 11;
+    mLayer.layerFEState.permissions = layer_state_t::Permission::READ_FRAME_BUFFER;
+    mLayer.layerFEState.backgroundBlurRadius = 30;
+    mLayer.layerFEState.blurRegions.resize(11);
+    EXPECT_CALL(mOutput, ensureOutputLayer(Eq(0u), Eq(mLayer.layerFE)))
+            .WillOnce(Return(&mLayer.outputLayer));
+
+    ensureOutputLayerIfVisible();
+
+    EXPECT_EQ(11, mCoverageState.aboveBlurRequests);
+    EXPECT_FALSE(mLayer.outputLayerState.ignoreBlur);
+}
 
 TEST_F(OutputEnsureOutputLayerIfVisibleTest, performsGeomLatchBeforeCheckingIfLayerIncluded) {
     EXPECT_CALL(mOutput, includesLayer(sp<LayerFE>(mLayer.layerFE))).WillOnce(Return(false));

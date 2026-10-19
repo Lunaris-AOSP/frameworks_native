@@ -343,6 +343,7 @@ private:
     // updated on both binder and the main thread.
     std::atomic<uint32_t> mQueuedWorkload;
     ftl::Flags<Workload> mCommittedWorkload;
+    ftl::Flags<Workload> mCompositedWorkload;
 
     void sendHintSessionHint(aidl::android::hardware::power::SessionHint hint);
 

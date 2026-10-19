@@ -797,8 +797,8 @@ void PowerAdvisor::setCommittedWorkload(ftl::Flags<Workload> workload) {
         // TODO(b/385028458) cancel load up hint
     }
 
-    bool increasedWorkload = queued == 0 && mCommittedWorkload.get() != 0;
-    if (increasedWorkload) {
+    ftl::Flags<Workload> newWorkload = ~mCompositedWorkload & mCommittedWorkload;
+    if (newWorkload.any()) {
         SFTRACE_INSTANT_FOR_TRACK(WorkloadTracer::TRACK_NAME,
                                   ftl::Concat("CommittedWorkload: ",
                                               ftl::truncated<20>(mCommittedWorkload.string()))
@@ -808,14 +808,14 @@ void PowerAdvisor::setCommittedWorkload(ftl::Flags<Workload> workload) {
 
         // Provides a load up hint only for effects that require client
         // composition, such as blur or shadows.
-        if (mCommittedWorkload.any(adpf::Workload::EFFECTS)) {
+        if (newWorkload.any(adpf::Workload::EFFECTS)) {
             notifyCpuLoadUp();
         }
     }
 }
 
 void PowerAdvisor::setCompositedWorkload(ftl::Flags<Workload> composited) {
-    composited &= TRIGGER_LOAD_CHANGE_HINTS;
-    mCommittedWorkload = composited;
+    mCommittedWorkload.clear();
+    mCompositedWorkload = composited;
 }
 } // namespace android::adpf::impl

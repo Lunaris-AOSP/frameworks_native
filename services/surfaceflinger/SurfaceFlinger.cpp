@@ -918,8 +918,8 @@ void chooseRenderEngineType(renderengine::RenderEngineCreationArgs::Builder& bui
 }
 
 /**
- * Choose a suggested blurring algorithm if supportsBlur is true. By default Kawase will be
- * suggested as it's faster than a full Gaussian blur and looks close enough.
+ * Choose a blurring algorithm if supportsBlur is true. Kawase dual-filter V2 is the default,
+ * matching Android 17; gaussian and kawase remain explicit debugging overrides.
  */
 renderengine::RenderEngine::BlurAlgorithm chooseBlurAlgorithm(bool supportsBlur) {
     if (!supportsBlur) {
@@ -931,19 +931,8 @@ renderengine::RenderEngine::BlurAlgorithm chooseBlurAlgorithm(bool supportsBlur)
         return renderengine::RenderEngine::BlurAlgorithm::Gaussian;
     } else if (algorithm == "kawase") {
         return renderengine::RenderEngine::BlurAlgorithm::Kawase;
-    } else if (algorithm == "kawase2") {
-        return renderengine::RenderEngine::BlurAlgorithm::KawaseDualFilter;
-    } else if (algorithm == "kawase2_fix_aliasing") {
-        return renderengine::RenderEngine::BlurAlgorithm::KawaseDualFilterV2;
     } else {
-        if (FlagManager::getInstance().window_blur_kawase2()) {
-            if (FlagManager::getInstance().window_blur_kawase2_fix_aliasing()) {
-                return renderengine::RenderEngine::BlurAlgorithm::KawaseDualFilterV2;
-            } else {
-                return renderengine::RenderEngine::BlurAlgorithm::KawaseDualFilter;
-            }
-        }
-        return renderengine::RenderEngine::BlurAlgorithm::Kawase;
+        return renderengine::RenderEngine::BlurAlgorithm::KawaseDualFilterV2;
     }
 }
 
@@ -963,7 +952,7 @@ void SurfaceFlinger::init() FTL_FAKE_GUARD(kMainThreadContext) {
                            .setImageCacheSize(maxFrameBufferAcquiredBuffers)
                            .setEnableProtectedContext(enable_protected_contents(false))
                            .setPrecacheToneMapperShaderOnly(false)
-                           .setBlurAlgorithm(chooseBlurAlgorithm(mSupportsBlur))
+                           .setBlurAlgorithm(chooseBlurAlgorithm(true))
                            .setContextPriority(
                                    useContextPriority
                                            ? renderengine::RenderEngine::ContextPriority::Realtime
@@ -5086,10 +5075,7 @@ ui::Size SurfaceFlinger::findLargestFramebufferSizeLocked() const {
     ui::Size maxSize(0, 0);
     int64_t maxArea = 0;
     for (const auto& [_, display] : mDisplays) {
-        if (!display->isPoweredOn()) {
-            continue;
-        }
-
+        // Powered-off displays still need a cache budget for the next composition.
         const ui::Size size = display->getSize();
         const int64_t area = size.getWidth() * size.getHeight();
         if (area > maxArea) {

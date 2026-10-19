@@ -54,6 +54,7 @@ struct LayerCreationArgs {
     gui::LayerMetadata metadata;
     pid_t ownerPid;
     uid_t ownerUid;
+    uint64_t ownerPermissions = 0;
     uint32_t sequence;
     bool addToRoot = true;
     wp<IBinder> parentHandle = nullptr;

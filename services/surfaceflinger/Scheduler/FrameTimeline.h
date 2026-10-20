@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 
+#include <ftl/static_vector.h>
 #include <gui/ISurfaceComposer.h>
 #include <gui/JankInfo.h>
 #include <gui/LayerMetadata.h>
@@ -379,10 +380,10 @@ private:
 
     void flushTokens(nsecs_t flushTime) REQUIRES(mMutex);
 
-    std::map<int64_t, TimelineItem> mPredictions GUARDED_BY(mMutex);
+    static constexpr size_t kMaxTokens = 500;
+    ftl::StaticVector<std::pair<int64_t, TimelineItem>, kMaxTokens> mPredictions GUARDED_BY(mMutex);
     int64_t mCurrentToken GUARDED_BY(mMutex);
     mutable std::mutex mMutex;
-    static constexpr size_t kMaxTokens = 500;
 };
 
 class FrameTimeline : public android::scheduler::FrameTimeline {

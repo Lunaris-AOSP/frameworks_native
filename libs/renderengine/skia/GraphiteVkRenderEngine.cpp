@@ -103,7 +103,7 @@ std::unique_ptr<SkiaGpuContext> GraphiteVkRenderEngine::createContext(
     return SkiaGpuContext::MakeVulkan_Graphite(vulkanInterface.createSkiaVulkanBackendContext());
 }
 
-void GraphiteVkRenderEngine::waitFence(SkiaGpuContext*, base::borrowed_fd fenceFd) {
+void GraphiteVkRenderEngine::waitFenceImpl(SkiaGpuContext*, base::borrowed_fd fenceFd) {
     if (fenceFd.get() < 0) return;
 
     int dupedFd = dup(fenceFd.get());

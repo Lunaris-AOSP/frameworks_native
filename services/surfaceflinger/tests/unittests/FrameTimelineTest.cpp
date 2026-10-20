@@ -172,7 +172,8 @@ public:
     }
 
     NO_THREAD_SAFETY_ANALYSIS
-    const std::map<int64_t, TimelineItem>& getPredictions() const {
+    const ftl::StaticVector<std::pair<int64_t, TimelineItem>, impl::TokenManager::kMaxTokens>&
+    getPredictions() const {
         return mTokenManager->mPredictions;
     }
 
@@ -216,6 +217,42 @@ public:
                                                                   kDeadlineThreshold,
                                                                   kStartThreshold};
 };
+
+TEST_F(FrameTimelineTest, tokenManagerRejectsUnassignedTokens) {
+    EXPECT_FALSE(mTokenManager->getPredictionsForToken(FrameTimelineInfo::INVALID_VSYNC_ID));
+    EXPECT_FALSE(mTokenManager->getPredictionsForToken(0));
+
+    const auto token = mTokenManager->generateTokenForPredictions({10, 20, 30, 40});
+    EXPECT_FALSE(mTokenManager->getPredictionsForToken(FrameTimelineInfo::INVALID_VSYNC_ID));
+    EXPECT_FALSE(mTokenManager->getPredictionsForToken(token + 1));
+    const auto predictions = mTokenManager->getPredictionsForToken(token);
+    ASSERT_TRUE(predictions);
+    EXPECT_EQ(predictions->startTime, 10);
+    EXPECT_EQ(predictions->endTime, 20);
+    EXPECT_EQ(predictions->presentTime, 30);
+    EXPECT_EQ(predictions->desiredPresentTime, 40);
+}
+
+TEST_F(FrameTimelineTest, tokenManagerRetainsNewestPredictionsAcrossWraparound) {
+    // Fill the storage and wrap it twice, checking both sides of the expiry boundary.
+    for (int64_t i = 0; i < static_cast<int64_t>(maxTokens) * 3; ++i) {
+        const auto token = mTokenManager->generateTokenForPredictions({i, i + 1, i + 2, i + 3});
+        ASSERT_EQ(token, i);
+        const auto oldestToken = std::max<int64_t>(0, token - static_cast<int64_t>(maxTokens) + 1);
+        EXPECT_FALSE(mTokenManager->getPredictionsForToken(oldestToken - 1));
+        EXPECT_FALSE(mTokenManager->getPredictionsForToken(token + 1));
+
+        for (int64_t retainedToken = oldestToken; retainedToken <= token; ++retainedToken) {
+            const auto predictions = mTokenManager->getPredictionsForToken(retainedToken);
+            ASSERT_TRUE(predictions);
+            EXPECT_EQ(predictions->startTime, retainedToken);
+            EXPECT_EQ(predictions->endTime, retainedToken + 1);
+            EXPECT_EQ(predictions->presentTime, retainedToken + 2);
+            EXPECT_EQ(predictions->desiredPresentTime, retainedToken + 3);
+        }
+        EXPECT_EQ(getPredictions().size(), static_cast<size_t>(token - oldestToken + 1));
+    }
+}
 
 TEST_F(FrameTimelineTest, tokenManagerRemovesStalePredictions) {
     int64_t token1 = mTokenManager->generateTokenForPredictions({0, 0, 0});

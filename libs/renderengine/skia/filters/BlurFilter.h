@@ -35,11 +35,11 @@ namespace skia {
 class BlurFilter {
 public:
     // Downsample FBO to improve performance
-    static constexpr float kInputScale = 0.25f;
+    static constexpr float kInputScale = 0.22f;
     // Downsample scale factor used to improve performance
     static constexpr float kInverseInputScale = 1.0f / kInputScale;
 
-    explicit BlurFilter(RuntimeEffectManager& effectManager, float maxCrossFadeRadius = 10.0f);
+    explicit BlurFilter(RuntimeEffectManager& effectManager, float maxCrossFadeRadius = 9.0f);
     virtual ~BlurFilter(){}
 
     // Execute blur, saving it to a TEMPORARY texture. WARNING: the returned SkImage is only

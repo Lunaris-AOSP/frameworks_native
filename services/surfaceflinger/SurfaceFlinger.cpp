@@ -917,7 +917,8 @@ void chooseRenderEngineType(renderengine::RenderEngineCreationArgs::Builder& bui
 
 /**
  * Choose a blurring algorithm if supportsBlur is true. Kawase dual-filter V2 is the default,
- * matching Android 17; gaussian and kawase remain explicit debugging overrides.
+ * matching Android 17; kawase_darkmoon is an opt-in alternative for low-end GPUs.
+ * Gaussian and the original Kawase remain explicit debugging overrides.
  */
 renderengine::RenderEngine::BlurAlgorithm chooseBlurAlgorithm(bool supportsBlur) {
     if (!supportsBlur) {

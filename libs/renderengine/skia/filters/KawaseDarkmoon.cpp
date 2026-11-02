@@ -85,7 +85,7 @@ bool isCompatible(const SkImageInfo& a, const SkImageInfo& b) {
             SkColorSpace::Equals(a.colorSpace(), b.colorSpace());
 }
 
-}
+} // namespace
 
 const SkString kEffectSource_KawaseDarkmoon_QuarterResDownSampleBlurEffect(R"(
     uniform shader child;
@@ -140,13 +140,24 @@ const SkString kEffectSource_KawaseDarkmoon_UpSampleBlurEffect(R"(
     }
 )");
 
-KawaseDarkmoon::KawaseDarkmoon(RuntimeEffectManager& effectManager)
-      : BlurFilter(effectManager) {
+KawaseDarkmoon::KawaseDarkmoon(RuntimeEffectManager& effectManager) : BlurFilter(effectManager) {
     mQuarterResDownSampleBlurEffect =
             effectManager.mKnownEffects[kKawaseDarkmoon_QuarterResDownSampleBlurEffect];
     mHalfResDownSampleBlurEffect =
             effectManager.mKnownEffects[kKawaseDarkmoon_HalfResDownSampleBlurEffect];
     mUpSampleBlurEffect = effectManager.mKnownEffects[kKawaseDarkmoon_UpSampleBlurEffect];
+}
+
+sk_sp<SkShader> KawaseDarkmoon::makeBlurShader(const sk_sp<SkImage>& blurredImage,
+                                               const SkMatrix& blurMatrix,
+                                               const SkRect& blurRect) const {
+    SkIRect targetBlurRect;
+    blurRect.roundIn(&targetBlurRect);
+    const SkRect content = SkRect::Make(levelSize(targetBlurRect.size(), 0));
+    return SkShaders::CoordClamp(blurredImage->makeShader(SkTileMode::kClamp, SkTileMode::kClamp,
+                                                          kLinearSampling),
+                                 insetForClamp(content))
+            ->makeWithLocalMatrix(blurMatrix);
 }
 
 bool KawaseDarkmoon::ensureSurface(SurfaceCache& cache, int index, SkiaGpuContext* context,
@@ -206,7 +217,7 @@ void KawaseDarkmoon::blurInto(const sk_sp<SkSurface>& drawSurface, SkISize drawC
     SkCanvas* canvas = drawSurface->getCanvas();
     SkAutoCanvasRestore autoRestore(canvas, true);
     if (isOversized(drawSurface, drawContent)) {
-        canvas->clipRect(SkRect::MakeWH(drawContent.width() + 1, drawContent.height() + 1));
+        canvas->clipRect(SkRect::Make(drawContent));
     }
     canvas->drawPaint(paint);
 }
@@ -241,8 +252,8 @@ sk_sp<SkImage> KawaseDarkmoon::generateTemporaryImage(SkiaGpuContext* context,
         cache.context = context;
     }
 
-    const SkISize displaySize = SkISize::Make(display.physicalDisplay.width(),
-                                              display.physicalDisplay.height());
+    const SkISize displaySize =
+            SkISize::Make(display.physicalDisplay.width(), display.physicalDisplay.height());
     const bool hintFromDisplay = !isProtected && !displaySize.isEmpty();
 
     const SkImageInfo baseInfo = input->imageInfo();
@@ -258,10 +269,8 @@ sk_sp<SkImage> KawaseDarkmoon::generateTemporaryImage(SkiaGpuContext* context,
         }
         const bool allocated =
                 ensureSurface(cache, i, context, baseInfo, contentSizes[i], preferred);
-        LOG_ALWAYS_FATAL_IF(!allocated,
-                                      "%s: Failed to create surface %d (%dx%d) for blurring!",
-                                      __func__, i, contentSizes[i].width(),
-                                      contentSizes[i].height());
+        LOG_ALWAYS_FATAL_IF(!allocated, "%s: Failed to create surface %d (%dx%d) for blurring!",
+                            __func__, i, contentSizes[i].width(), contentSizes[i].height());
     }
     const sk_sp<SkSurface>* surfaces = cache.surfaces;
 
@@ -276,16 +285,15 @@ sk_sp<SkImage> KawaseDarkmoon::generateTemporaryImage(SkiaGpuContext* context,
             sqrtf(std::max(0.0f, powf(radius * kInputScale, 2.0f) - sumSquaredR) /
                   (sumSquaredStep == 0 ? 1.0f : sumSquaredStep));
 
-    // First pass: 4x down-sample from the input.
+    // First pass: down-sample from the input at BlurFilter::kInputScale.
     {
         // Skia's local matrix maps shader space -> destination, hence translate-then-scale.
         SkMatrix blurMatrix = SkMatrix::Translate(-blurRect.fLeft, -blurRect.fTop);
         blurMatrix.postScale(kInputScale, kInputScale);
         const SkRect inputClamp = SkRect::Make(targetBlurRect);
-        const bool clampInput = isOversized(surfaces[0], contentSizes[0]);
         blurInto(surfaces[0], contentSizes[0],
                  input->makeShader(SkTileMode::kClamp, SkTileMode::kClamp, kLinearSampling),
-                 clampInput ? &inputClamp : nullptr, blurMatrix,
+                 &inputClamp, blurMatrix,
                  0, // unused: the down-sample effect hardcodes its offsets
                  1.0f, mQuarterResDownSampleBlurEffect);
     }
@@ -300,14 +308,13 @@ sk_sp<SkImage> KawaseDarkmoon::generateTemporaryImage(SkiaGpuContext* context,
         const bool clampSrc = isOversized(surfaces[i], src);
         blurInto(surfaces[i + 1], dst,
                  surfaces[i]->makeTemporaryImage()->makeShader(SkTileMode::kClamp,
-                                                               SkTileMode::kClamp,
-                                                               kLinearSampling),
+                                                               SkTileMode::kClamp, kLinearSampling),
                  clampSrc ? &srcClamp : nullptr, toDest,
                  0, // unused: the down-sample effect hardcodes its offsets
                  1.0f, mHalfResDownSampleBlurEffect);
     }
 
-    // Blur + up-sample back to quarter resolution.
+    // Blur + up-sample back to the initial down-sampled resolution.
     for (int i = filterPasses - 1; i >= 0; i--) {
         const SkISize src = contentSizes[i + 1];
         const SkISize dst = contentSizes[i];

@@ -40,6 +40,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -66,6 +67,7 @@
 #include <private/android_filesystem_config.h>
 #include <private/android_projectid_config.h>
 #include <selinux/android.h>
+#include <selinux/selinux.h>
 #include <system/thread_defs.h>
 #include <utils/Trace.h>
 
@@ -1435,6 +1437,282 @@ binder::Status InstalldNativeService::clearAppData(const std::optional<std::stri
         res = status;
     }
     return res;
+}
+
+static bool is_emoji_font_name(const std::string& name) {
+    std::string lower(name);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+    return lower.find("emoji") != std::string::npos && base::EndsWith(lower, ".ttf");
+}
+
+static size_t emoji_font_size(int fd) {
+    struct stat st;
+    if (fstat(fd, &st) < 0) return 0;
+    off_t size = S_ISREG(st.st_mode) ? st.st_size : ashmem_get_size_region(fd);
+    if (size <= 0 || size > 128 * 1024 * 1024) return 0;
+    return static_cast<size_t>(size);
+}
+
+static bool copy_font(int srcFd, int dstFd) {
+    size_t size = emoji_font_size(srcFd);
+    if (size == 0) return false;
+    void* buffer = mmap(nullptr, size, PROT_READ, MAP_SHARED, srcFd, 0);
+    if (buffer == MAP_FAILED) return false;
+    bool written = base::WriteFully(dstFd, buffer, size);
+    munmap(buffer, size);
+    return written;
+}
+
+static bool copy_label(int fromFd, int toFd) {
+    char* con = nullptr;
+    if (fgetfilecon(fromFd, &con) < 0) return false;
+    int res = fsetfilecon(toFd, con);
+    freecon(con);
+    return res == 0;
+}
+
+static bool write_font_file(int dirFd, const std::string& name, int srcFd, uid_t owner, gid_t group,
+                            mode_t mode, int labelFromFd) {
+    const std::string tmp = "." + name + ".tmp";
+    unlinkat(dirFd, tmp.c_str(), 0);
+    unique_fd fd(openat(dirFd, tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                        0600));
+    if (!fd.ok()) return false;
+    bool written = copy_font(srcFd, fd.get()) && fchown(fd.get(), owner, group) == 0 &&
+            fchmod(fd.get(), mode) == 0 && copy_label(labelFromFd, fd.get()) &&
+            fsync(fd.get()) == 0 && renameat(dirFd, tmp.c_str(), dirFd, name.c_str()) == 0;
+    if (!written) unlinkat(dirFd, tmp.c_str(), 0);
+    return written;
+}
+
+static unique_fd make_app_dir(int parentFd, const std::string& name, uid_t uid) {
+    bool created = mkdirat(parentFd, name.c_str(), 0700) == 0;
+    if (!created && errno != EEXIST) return {};
+    unique_fd fd(openat(parentFd, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (!fd.ok()) return {};
+    if (created) {
+        if (fchown(fd.get(), uid, uid) < 0 || !copy_label(parentFd, fd.get())) return {};
+    } else {
+        struct stat st;
+        if (fstat(fd.get(), &st) < 0 || st.st_uid != uid) {
+            errno = EACCES;
+            return {};
+        }
+    }
+    return fd;
+}
+
+static std::vector<std::string> split_app_relative_path(const std::string& path) {
+    if (path.find('\0') != std::string::npos) return {};
+    std::vector<std::string> parts = Split(path, "/");
+    for (const auto& part : parts) {
+        if (part.empty() || part == "." || part == "..") return {};
+    }
+    return parts;
+}
+
+static unique_fd open_app_subdir(int baseFd, const std::vector<std::string>& parts, uid_t uid,
+                                 bool create) {
+    unique_fd cur(fcntl(baseFd, F_DUPFD_CLOEXEC, 0));
+    for (const auto& part : parts) {
+        if (!cur.ok()) break;
+        unique_fd next(
+                openat(cur.get(), part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (!next.ok() && errno == ENOENT && create) next = make_app_dir(cur.get(), part, uid);
+        cur = std::move(next);
+    }
+    return cur;
+}
+
+static constexpr int kMaxEmojiFontDepth = 16;
+
+static int replace_emoji_fonts_in_dir(int dirFd, uid_t uid, int srcFd, int depth) {
+    if (depth > kMaxEmojiFontDepth) return 0;
+
+    std::vector<std::pair<std::string, unsigned char>> entries;
+    {
+        int listFd = fcntl(dirFd, F_DUPFD_CLOEXEC, 0);
+        std::unique_ptr<DIR, decltype(&closedir)> dir(listFd < 0 ? nullptr : fdopendir(listFd),
+                                                      closedir);
+        if (!dir) {
+            if (listFd >= 0) close(listFd);
+            return 0;
+        }
+        for (dirent* de = readdir(dir.get()); de != nullptr; de = readdir(dir.get())) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            unsigned char type = de->d_type;
+            if (type == DT_UNKNOWN) {
+                struct stat st;
+                if (fstatat(dirFd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0) continue;
+                type = S_ISDIR(st.st_mode) ? DT_DIR : S_ISREG(st.st_mode) ? DT_REG : DT_UNKNOWN;
+            }
+            if (type == DT_DIR || (type == DT_REG && is_emoji_font_name(de->d_name))) {
+                entries.emplace_back(de->d_name, type);
+            }
+        }
+    }
+
+    int replaced = 0;
+    for (const auto& [name, type] : entries) {
+        if (type == DT_DIR) {
+            unique_fd sub(openat(dirFd, name.c_str(),
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+            if (sub.ok()) replaced += replace_emoji_fonts_in_dir(sub.get(), uid, srcFd, depth + 1);
+            continue;
+        }
+        unique_fd fd(openat(dirFd, name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
+        struct stat st;
+        if (!fd.ok() || fstat(fd.get(), &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != uid) {
+            continue;
+        }
+        if (write_font_file(dirFd, name, srcFd, st.st_uid, st.st_gid, st.st_mode & 0777,
+                            fd.get())) {
+            replaced++;
+        } else {
+            PLOG(WARNING) << "Failed to replace emoji font " << name;
+        }
+    }
+    return replaced;
+}
+
+static bool lock_emoji_font(int parentFd, const std::string& name, uid_t uid, int srcFd) {
+    struct stat st;
+    if (fstatat(parentFd, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 && !S_ISREG(st.st_mode)) {
+        errno = EEXIST;
+        return false;
+    }
+    return write_font_file(parentFd, name, srcFd, AID_ROOT, uid, 0444, parentFd);
+}
+
+static bool is_app_data_dir(int fd, uid_t uid) {
+    struct stat st;
+    return fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == uid;
+}
+
+binder::Status InstalldNativeService::replaceAppEmojiFonts(
+        const std::optional<std::string>& uuid, const std::string& packageName, int32_t userId,
+        int32_t appId, const ParcelFileDescriptor& fontFd,
+        const std::vector<std::string>& lockedFiles, int32_t* _aidl_return) {
+    ENFORCE_UID(AID_SYSTEM);
+    ENFORCE_VALID_USER(userId);
+    CHECK_ARGUMENT_UUID(uuid);
+    CHECK_ARGUMENT_PACKAGE_NAME(packageName);
+    CHECK_ARGUMENT_APP_ID(appId);
+    *_aidl_return = 0;
+
+    std::vector<std::vector<std::string>> lockedParts;
+    for (const auto& lockedFile : lockedFiles) {
+        std::vector<std::string> parts = split_app_relative_path(lockedFile);
+        if (parts.empty()) {
+            return exception(binder::Status::EX_ILLEGAL_ARGUMENT, "Bad path " + lockedFile);
+        }
+        lockedParts.push_back(std::move(parts));
+    }
+    const int srcFd = fontFd.get();
+    if (srcFd < 0 || emoji_font_size(srcFd) == 0) {
+        return exception(binder::Status::EX_ILLEGAL_ARGUMENT, "Invalid emoji font descriptor");
+    }
+
+    LOCK_PACKAGE_USER();
+
+    const char* uuid_ = uuid ? uuid->c_str() : nullptr;
+    const char* pkgname = packageName.c_str();
+    const uid_t uid = multiuser_get_uid(userId, appId);
+
+    const std::string cePath = create_data_user_ce_package_path(uuid_, userId, pkgname);
+    const std::string dePath = create_data_user_de_package_path(uuid_, userId, pkgname);
+    unique_fd ceFd(open(cePath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    unique_fd deFd(open(dePath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if ((ceFd.ok() && !is_app_data_dir(ceFd.get(), uid))
+            || (deFd.ok() && !is_app_data_dir(deFd.get(), uid))) {
+        return exception(binder::Status::EX_ILLEGAL_ARGUMENT,
+                         "App data directory has an unexpected owner");
+    }
+    if (ceFd.ok()) *_aidl_return += replace_emoji_fonts_in_dir(ceFd.get(), uid, srcFd, 0);
+    if (deFd.ok()) *_aidl_return += replace_emoji_fonts_in_dir(deFd.get(), uid, srcFd, 0);
+    if (!ceFd.ok()) return ok();
+
+    for (size_t i = 0; i < lockedParts.size(); i++) {
+        std::vector<std::string> parts = lockedParts[i];
+        std::string name = parts.back();
+        parts.pop_back();
+        unique_fd parentFd = open_app_subdir(ceFd.get(), parts, uid, /*create=*/true);
+        if (parentFd.ok() && lock_emoji_font(parentFd.get(), name, uid, srcFd)) {
+            (*_aidl_return)++;
+        } else {
+            PLOG(WARNING) << "Failed to lock emoji font " << lockedFiles[i] << " of "
+                          << packageName;
+        }
+    }
+    return ok();
+}
+
+binder::Status InstalldNativeService::clearAppDataSubdir(const std::optional<std::string>& uuid,
+                                                         const std::string& packageName,
+                                                         int32_t userId, int32_t appId,
+                                                         const std::string& relativePath,
+                                                         bool block) {
+    ENFORCE_UID(AID_SYSTEM);
+    ENFORCE_VALID_USER(userId);
+    CHECK_ARGUMENT_UUID(uuid);
+    CHECK_ARGUMENT_PACKAGE_NAME(packageName);
+    CHECK_ARGUMENT_APP_ID(appId);
+
+    std::vector<std::string> parts = split_app_relative_path(relativePath);
+    if (parts.empty()) {
+        return exception(binder::Status::EX_ILLEGAL_ARGUMENT, "Bad path " + relativePath);
+    }
+    std::string name = parts.back();
+    parts.pop_back();
+
+    LOCK_PACKAGE_USER();
+
+    const char* uuid_ = uuid ? uuid->c_str() : nullptr;
+    const uid_t uid = multiuser_get_uid(userId, appId);
+    const std::string cePath = create_data_user_ce_package_path(uuid_, userId, packageName.c_str());
+    unique_fd ceFd(open(cePath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (!ceFd.ok()) return error("Failed to open " + cePath);
+    if (!is_app_data_dir(ceFd.get(), uid)) {
+        return exception(binder::Status::EX_ILLEGAL_ARGUMENT,
+                         "App data directory has an unexpected owner");
+    }
+
+    unique_fd parentFd = open_app_subdir(ceFd.get(), parts, uid, block);
+    if (!parentFd.ok()) {
+        if (errno == ENOENT && !block) return ok();
+        return error("Failed to open parent of " + relativePath);
+    }
+    unique_fd targetFd(
+            openat(parentFd.get(), name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (targetFd.ok()) {
+        if (delete_dir_contents_fd(parentFd.get(), name.c_str()) != 0) {
+            return error("Failed to clear " + relativePath);
+        }
+    } else if (errno != ENOENT) {
+        return error("Failed to open " + relativePath);
+    } else if (!block) {
+        return ok();
+    } else {
+        targetFd = make_app_dir(parentFd.get(), name, uid);
+        if (!targetFd.ok()) return error("Failed to create " + relativePath);
+    }
+
+    if (block) {
+        if (fchown(targetFd.get(), AID_ROOT, AID_ROOT) < 0 || fchmod(targetFd.get(), 0) < 0) {
+            return error("Failed to block " + relativePath);
+        }
+        return ok();
+    }
+
+    struct stat st;
+    if (fstat(targetFd.get(), &st) < 0) return error("Failed to stat " + relativePath);
+    if (st.st_uid == AID_ROOT && (st.st_mode & 0777) == 0) {
+        if (fchown(targetFd.get(), uid, uid) < 0 || fchmod(targetFd.get(), 0700) < 0) {
+            return error("Failed to unblock " + relativePath);
+        }
+    }
+    return ok();
 }
 
 binder::Status InstalldNativeService::clearSdkSandboxDataPackageDirectory(

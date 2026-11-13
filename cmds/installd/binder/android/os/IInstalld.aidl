@@ -159,6 +159,23 @@ interface IInstalld {
     int enableFsverity(in IFsveritySetupAuthToken authToken, @utf8InCpp String filePath,
             @utf8InCpp String packageName);
 
+    /**
+     * Overwrites every *emoji*.ttf the app owns in its CE and DE data with the font in
+     * fontFd, then writes it to each of lockedFiles (paths relative to the CE data dir) as a
+     * root-owned read-only file. Returns the number of files written.
+     */
+    int replaceAppEmojiFonts(@nullable @utf8InCpp String uuid, @utf8InCpp String packageName,
+            int userId, int appId, in ParcelFileDescriptor fontFd,
+            in @utf8InCpp String[] lockedFiles);
+
+    /**
+     * Empties a directory relative to the app's CE data dir. With block, the directory is
+     * created if missing and left root-owned mode 000 so the app can't write into it. Without
+     * block, a directory blocked this way is handed back to the app.
+     */
+    void clearAppDataSubdir(@nullable @utf8InCpp String uuid, @utf8InCpp String packageName,
+            int userId, int appId, @utf8InCpp String relativePath, boolean block);
+
     const int FLAG_STORAGE_DE = 0x1;
     const int FLAG_STORAGE_CE = 0x2;
     const int FLAG_STORAGE_EXTERNAL = 0x4;

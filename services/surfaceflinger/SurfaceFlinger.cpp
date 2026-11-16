@@ -493,7 +493,7 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipI
 
     useHwcForRgbToYuv = force_hwc_copy_for_virtual_displays(false);
 
-    maxFrameBufferAcquiredBuffers = max_frame_buffer_acquired_buffers(2);
+    maxFrameBufferAcquiredBuffers = max_frame_buffer_acquired_buffers(3);
     minAcquiredBuffers =
             SurfaceFlingerProperties::min_acquired_buffers().value_or(minAcquiredBuffers);
     maxAcquiredBuffersOpt = SurfaceFlingerProperties::max_acquired_buffers();

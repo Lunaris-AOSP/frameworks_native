@@ -469,7 +469,7 @@ private:
                                   },
                                   [](const std::vector<BlurRegion>& regions) {
                                       std::vector<std::string> result;
-                                      for (const auto region : regions) {
+                                      for (const auto& region : regions) {
                                           std::string str;
                                           base::StringAppendF(&str,
                                                               "{radius=%du, cornerRadii=[%f, %f, "

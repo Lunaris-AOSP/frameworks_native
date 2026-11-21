@@ -875,8 +875,10 @@ void SkiaRenderEngine::drawLayersInternal(
                 layer.backgroundBlurRadius < mBlurFilter->getMaxCrossFadeRadius()) {
                 requiresCompositionLayer = true;
             }
-            for (auto region : layer.blurRegions) {
-                if (region.blurRadius < mBlurFilter->getMaxCrossFadeRadius()) {
+            for (const auto& region : layer.blurRegions) {
+                if (region.glassMode == 4 || region.blurRadius < mBlurFilter->getMaxCrossFadeRadius() ||
+                    (region.blurRadius == 0 &&
+                     (region.glassMode != 0 || !region.getAdvancedBlurShader().empty()))) {
                     requiresCompositionLayer = true;
                 }
             }
@@ -1035,8 +1037,10 @@ void SkiaRenderEngine::drawLayersInternal(
                         layer.backgroundBlurRadius < mBlurFilter->getMaxCrossFadeRadius()) {
                         requiresCrossFadeWithBlurInput = true;
                     }
-                    for (auto region : layer.blurRegions) {
-                        if (region.blurRadius < mBlurFilter->getMaxCrossFadeRadius()) {
+                    for (const auto& region : layer.blurRegions) {
+                        if (region.glassMode == 4 || region.blurRadius < mBlurFilter->getMaxCrossFadeRadius() ||
+                            (region.blurRadius == 0 &&
+                             (region.glassMode != 0 || !region.getAdvancedBlurShader().empty()))) {
                             requiresCrossFadeWithBlurInput = true;
                         }
                     }
@@ -1074,13 +1078,14 @@ void SkiaRenderEngine::drawLayersInternal(
                     // reuse the same result from generateTemporaryImage(...). The exact order does
                     // not matter. Initial sizes for ftl stack-first collections were chosen
                     // semi-arbitrarily.
-                    using BlurRegionList = ftl::SmallVector<BlurRegion, 4>;
+                    using BlurRegionList = ftl::SmallVector<const BlurRegion*, 4>;
                     ftl::SmallMap<uint32_t, BlurRegionList, 2> regionsPerRadius;
                     for (const BlurRegion& region : layer.blurRegions) {
-                        if (region.blurRadius > 0) {
+                        if (region.blurRadius > 0 || region.glassMode != 0 ||
+                            !region.getAdvancedBlurShader().empty()) {
                             const auto& [entry, _] = regionsPerRadius.try_emplace(region.blurRadius,
                                                                                   BlurRegionList());
-                            entry->second.push_back(region);
+                            entry->second.push_back(&region);
                         }
                     }
 
@@ -1091,16 +1096,19 @@ void SkiaRenderEngine::drawLayersInternal(
                                 mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region),
                                                             region.blurRadius, 1.0f, region.alpha,
                                                             blurRect, temporaryBlurredImage,
-                                                            blurInput);
+                                                            blurInput, region.glassMode,
+                                                            region.glassDensity,
+                                                            region.getAdvancedBlurShader(),
+                                                            region.advancedBlurTint);
                             };
 
                     // Reuse existing temporaryBlurredImage from background blur for any regions
                     // with the same blur radius.
                     if (temporaryBlurredImage != nullptr &&
                         regionsPerRadius.contains(layer.backgroundBlurRadius)) {
-                        for (const BlurRegion& region :
+                        for (const BlurRegion* region :
                              regionsPerRadius.get(layer.backgroundBlurRadius)->get()) {
-                            drawRegion(temporaryBlurredImage, region);
+                            drawRegion(temporaryBlurredImage, *region);
                         }
                         regionsPerRadius.erase(layer.backgroundBlurRadius);
                     }
@@ -1109,12 +1117,12 @@ void SkiaRenderEngine::drawLayersInternal(
                     for (const auto& [radius, regions] : regionsPerRadius) {
                         {
                             SFTRACE_NAME("BlurRegion");
-                            temporaryBlurredImage =
-                                    mBlurFilter->generateTemporaryImage(context, display, radius,
-                                                                        blurInput, blurRect);
+                            temporaryBlurredImage = radius == 0 ? blurInput
+                                    : mBlurFilter->generateTemporaryImage(context, display,
+                                                                          radius, blurInput, blurRect);
                         }
-                        for (const BlurRegion& region : regions) {
-                            drawRegion(temporaryBlurredImage, region);
+                        for (const BlurRegion* region : regions) {
+                            drawRegion(temporaryBlurredImage, *region);
                         }
                     }
                 }

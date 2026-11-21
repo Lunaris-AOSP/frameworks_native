@@ -17,6 +17,7 @@
 #define LOG_TAG "LayerState"
 
 #include <cinttypes>
+#include <algorithm>
 
 #include <android/gui/ISurfaceComposerClient.h>
 #include <android/native_window.h>
@@ -191,8 +192,21 @@ status_t layer_state_t::write(Parcel& output) const
     SAFE_PARCEL(output.writeBool, autoRefresh);
     SAFE_PARCEL(output.writeBool, dimmingEnabled);
 
+    std::vector<std::shared_ptr<const std::string>> advancedBlurShaders;
+    for (const auto& region : blurRegions) {
+        if (!region.getAdvancedBlurShader().empty() &&
+            std::find_if(advancedBlurShaders.begin(), advancedBlurShaders.end(),
+                         [&](const auto& shader) { return *shader == region.getAdvancedBlurShader(); }) ==
+                    advancedBlurShaders.end()) {
+            advancedBlurShaders.push_back(region.advancedBlurShader);
+        }
+    }
+    SAFE_PARCEL(output.writeUint32, advancedBlurShaders.size());
+    for (const auto& shader : advancedBlurShaders) {
+        SAFE_PARCEL(output.writeUtf8AsUtf16, *shader);
+    }
     SAFE_PARCEL(output.writeUint32, blurRegions.size());
-    for (auto region : blurRegions) {
+    for (const auto& region : blurRegions) {
         SAFE_PARCEL(output.writeUint32, region.blurRadius);
         SAFE_PARCEL(output.writeFloat, region.cornerRadiusTL);
         SAFE_PARCEL(output.writeFloat, region.cornerRadiusTR);
@@ -203,6 +217,13 @@ status_t layer_state_t::write(Parcel& output) const
         SAFE_PARCEL(output.writeInt32, region.top);
         SAFE_PARCEL(output.writeInt32, region.right);
         SAFE_PARCEL(output.writeInt32, region.bottom);
+        SAFE_PARCEL(output.writeUint32, region.glassMode);
+        SAFE_PARCEL(output.writeFloat, region.glassDensity);
+        SAFE_PARCEL(output.writeUint32, region.advancedBlurTint);
+        auto shader = std::find_if(advancedBlurShaders.begin(), advancedBlurShaders.end(),
+                [&](const auto& source) { return *source == region.getAdvancedBlurShader(); });
+        SAFE_PARCEL(output.writeInt32, shader == advancedBlurShaders.end()
+                ? -1 : static_cast<int32_t>(shader - advancedBlurShaders.begin()));
     }
 
     SAFE_PARCEL(output.write, stretchEffect);
@@ -349,6 +370,18 @@ status_t layer_state_t::read(const Parcel& input)
     SAFE_PARCEL(input.readBool, &autoRefresh);
     SAFE_PARCEL(input.readBool, &dimmingEnabled);
 
+    uint32_t numAdvancedBlurShaders = 0;
+    SAFE_PARCEL(input.readUint32, &numAdvancedBlurShaders);
+    if (numAdvancedBlurShaders > 128) return BAD_VALUE;
+    std::vector<std::shared_ptr<const std::string>> advancedBlurShaders(numAdvancedBlurShaders);
+    size_t shaderBytes = 0;
+    for (auto& shader : advancedBlurShaders) {
+        std::string source;
+        SAFE_PARCEL(input.readUtf8FromUtf16, &source);
+        shaderBytes += source.size();
+        if (source.empty() || source.size() > 32768 || shaderBytes > 256 * 1024) return BAD_VALUE;
+        shader = std::make_shared<const std::string>(std::move(source));
+    }
     uint32_t numRegions = 0;
     SAFE_PARCEL(input.readUint32, &numRegions);
     blurRegions.clear();
@@ -364,7 +397,16 @@ status_t layer_state_t::read(const Parcel& input)
         SAFE_PARCEL(input.readInt32, &region.top);
         SAFE_PARCEL(input.readInt32, &region.right);
         SAFE_PARCEL(input.readInt32, &region.bottom);
-        blurRegions.push_back(region);
+        SAFE_PARCEL(input.readUint32, &region.glassMode);
+        SAFE_PARCEL(input.readFloat, &region.glassDensity);
+        SAFE_PARCEL(input.readUint32, &region.advancedBlurTint);
+        int32_t shaderIndex = -1;
+        SAFE_PARCEL(input.readInt32, &shaderIndex);
+        if (shaderIndex < -1 || shaderIndex >= static_cast<int32_t>(advancedBlurShaders.size())) {
+            return BAD_VALUE;
+        }
+        if (shaderIndex >= 0) region.advancedBlurShader = advancedBlurShaders[shaderIndex];
+        blurRegions.push_back(std::move(region));
     }
 
     SAFE_PARCEL(input.read, stretchEffect);

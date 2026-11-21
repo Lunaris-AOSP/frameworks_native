@@ -313,7 +313,7 @@ static inline void PrintTo(const LayerSettings& settings, ::std::ostream* os) {
     *os << "\n    .backgroundBlurScale = " << settings.backgroundBlurScale;
     if (settings.blurRegions.size()) {
         *os << "\n    .blurRegions =";
-        for (auto blurRegion : settings.blurRegions) {
+        for (const auto& blurRegion : settings.blurRegions) {
             *os << "\n";
             PrintTo(blurRegion, os);
         }

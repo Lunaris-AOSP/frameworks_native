@@ -17,6 +17,8 @@
 #pragma once
 
 #include <SkCanvas.h>
+#include <string>
+#include <map>
 #include <SkImage.h>
 #include <SkMatrix.h>
 #include <SkRuntimeEffect.h>
@@ -66,7 +68,9 @@ public:
     void drawBlurRegion(SkCanvas* canvas, const SkRRect& effectRegion,
                                 const uint32_t blurRadius, const float zoomScale,
                                 const float blurAlpha, const SkRect& blurRect,
-                                sk_sp<SkImage> blurredImage, sk_sp<SkImage> input);
+                                sk_sp<SkImage> blurredImage, sk_sp<SkImage> input,
+                                uint32_t glassMode = 0, float glassDensity = 1.0f,
+                                const std::string& advancedBlurShader = {}, uint32_t advancedBlurTint = 0);
 
     float getMaxCrossFadeRadius() const;
 
@@ -87,6 +91,16 @@ private:
 
     // Optional blend used for crossfade only if mMaxCrossFadeRadius > 0
     const sk_sp<SkRuntimeEffect> mMixEffect;
+    const sk_sp<SkRuntimeEffect> mGlassEffect;
+    struct PresetEffect {
+        sk_sp<SkRuntimeEffect> effect;
+        bool valid = false;
+        bool sharpContent = false;
+        bool radius = false;
+        bool chrome = false;
+    };
+    const PresetEffect& presetEffect(const std::string& source);
+    std::map<std::string, PresetEffect> mPresetEffects;
 };
 
 } // namespace skia

@@ -85,12 +85,16 @@ private:
     ui::Size mUnprotectedDisplaySize;
     ui::Size mProtectedDisplaySize;
 
-    void blurInto(const sk_sp<SkSurface>& drawSurface, const int destWidth,
+    void blurInto(const sk_sp<SkSurface>& drawSurface, const SkISize& destSize,
                   const sk_sp<SkImage>& readImage, const SkIRect& srcRect,
                   const bool inputEdgesNeedClamp, const float radius, const float alpha,
                   const sk_sp<SkRuntimeEffect>&) const;
 
-    void blurInto(const sk_sp<SkSurface>& drawSurface, const sk_sp<SkShader> input,
+    sk_sp<SkShader> makeBlurShader(const sk_sp<SkImage>& blurredImage, const SkMatrix& blurMatrix,
+                                   const SkRect& blurRect) const override;
+
+    void blurInto(const sk_sp<SkSurface>& drawSurface, const SkISize& destSize,
+                  const sk_sp<SkShader> input,
                   const SkIRect& srcRect, const SkMatrix& srcRectToInputMatrix,
                   const bool inputEdgesNeedClamp, const float radius, const float alpha,
                   const sk_sp<SkRuntimeEffect>&) const;

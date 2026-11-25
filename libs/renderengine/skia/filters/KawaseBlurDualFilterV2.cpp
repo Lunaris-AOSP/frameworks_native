@@ -131,20 +131,49 @@ KawaseBlurDualFilterV2::KawaseBlurDualFilterV2(
     mUpSampleBlurEffect = effectManager.mKnownEffects[kKawaseBlurDualFilterV2_UpSampleBlurEffect];
 }
 
-void KawaseBlurDualFilterV2::blurInto(const sk_sp<SkSurface>& drawSurface, const int destWidth,
+static SkRect samplingBounds(const SkIRect& bounds) {
+    const SkRect rect = SkRect::Make(bounds);
+    SkRect inset = rect.makeInset(0.5001f, 0.5001f);
+    if (inset.width() < 0) inset.fLeft = inset.fRight = rect.centerX();
+    if (inset.height() < 0) inset.fTop = inset.fBottom = rect.centerY();
+    return inset;
+}
+
+static SkISize levelSize(const SkIRect& bounds, float scale) {
+    return SkISize::Make(std::max(1, static_cast<int>(bounds.width() / scale)),
+                         std::max(1, static_cast<int>(bounds.height() / scale)));
+}
+
+sk_sp<SkShader> KawaseBlurDualFilterV2::makeBlurShader(const sk_sp<SkImage>& blurredImage,
+                                                       const SkMatrix& blurMatrix,
+                                                       const SkRect& blurRect) const {
+    SkIRect bounds;
+    blurRect.roundIn(&bounds);
+    const SkISize content = levelSize(bounds, kScales[0]);
+    if (blurredImage->dimensions() == content) {
+        return BlurFilter::makeBlurShader(blurredImage, blurMatrix, blurRect);
+    }
+    auto shader = blurredImage->makeShader(SkTileMode::kClamp, SkTileMode::kClamp,
+                                           SkSamplingOptions(SkFilterMode::kLinear));
+    return SkShaders::CoordClamp(std::move(shader), samplingBounds(SkIRect::MakeSize(content)))
+            ->makeWithLocalMatrix(blurMatrix);
+}
+
+void KawaseBlurDualFilterV2::blurInto(const sk_sp<SkSurface>& drawSurface, const SkISize& destSize,
                                       const sk_sp<SkImage>& readImage, const SkIRect& srcRect,
                                       const bool inputEdgesNeedClamp, const float radius,
                                       const float alpha,
                                       const sk_sp<SkRuntimeEffect>& blurEffect) const {
-    const float scale = static_cast<float>(destWidth) / static_cast<float>(srcRect.width());
+    const float scale = static_cast<float>(destSize.width()) / static_cast<float>(srcRect.width());
     SkMatrix blurMatrix = SkMatrix::Scale(scale, scale);
-    blurInto(drawSurface,
+    blurInto(drawSurface, destSize,
              readImage->makeShader(SkTileMode::kClamp, SkTileMode::kClamp,
                                    SkSamplingOptions(SkFilterMode::kLinear, SkMipmapMode::kNone)),
              srcRect, blurMatrix, inputEdgesNeedClamp, radius, alpha, blurEffect);
 }
 
-void KawaseBlurDualFilterV2::blurInto(const sk_sp<SkSurface>& drawSurface, sk_sp<SkShader> input,
+void KawaseBlurDualFilterV2::blurInto(const sk_sp<SkSurface>& drawSurface, const SkISize& destSize,
+                                      sk_sp<SkShader> input,
                                       const SkIRect& srcRect, const SkMatrix& srcRectToInputMatrix,
                                       const bool inputEdgesNeedClamp, const float radius,
                                       const float alpha,
@@ -154,19 +183,7 @@ void KawaseBlurDualFilterV2::blurInto(const sk_sp<SkSurface>& drawSurface, sk_sp
     // slightly more than 0.5 texel (with a tiny epsilon to avoid rounding ambiguity on some
     // drivers. The epsilon of 0.0001 is lifted from Skia).
     if (inputEdgesNeedClamp) {
-        constexpr float insetFactor = 0.5001f;
-        SkRect insetRect = SkRect::Make(srcRect).makeInset(insetFactor, insetFactor);
-        if (insetRect.width() < 0) {
-            const float centerX = insetRect.centerX();
-            insetRect.fLeft = centerX;
-            insetRect.fRight = centerX;
-        }
-        if (insetRect.height() < 0) {
-            const float centerY = insetRect.centerY();
-            insetRect.fTop = centerY;
-            insetRect.fBottom = centerY;
-        }
-        input = SkShaders::CoordClamp(input, insetRect);
+        input = SkShaders::CoordClamp(input, samplingBounds(srcRect));
     }
     input = input->makeWithLocalMatrix(srcRectToInputMatrix);
 
@@ -191,7 +208,11 @@ void KawaseBlurDualFilterV2::blurInto(const sk_sp<SkSurface>& drawSurface, sk_sp
         paint.setShader(blurBuilder.makeShader(nullptr));
     }
     paint.setBlendMode(alpha == 1.0f ? SkBlendMode::kSrc : SkBlendMode::kSrcOver);
-    drawSurface->getCanvas()->drawPaint(paint);
+    if (inputEdgesNeedClamp && drawSurface->imageInfo().dimensions() != destSize) {
+        drawSurface->getCanvas()->drawRect(SkRect::Make(destSize), paint);
+    } else {
+        drawSurface->getCanvas()->drawPaint(paint);
+    }
 }
 
 sk_sp<SkImage> KawaseBlurDualFilterV2::generateTemporaryImage(SkiaGpuContext* context,
@@ -212,23 +233,15 @@ sk_sp<SkImage> KawaseBlurDualFilterV2::generateTemporaryImage(SkiaGpuContext* co
     SkIRect targetBlurRect;
     blurRect.roundIn(&targetBlurRect);
 
-    auto makeSurface = [&](float scale) -> sk_sp<SkSurface> {
-        const int newW =
-                std::max(1, static_cast<int>(static_cast<float>(targetBlurRect.width()) / scale));
-        const int newH =
-                std::max(1, static_cast<int>(static_cast<float>(targetBlurRect.height()) / scale));
-        sk_sp<SkSurface> surface =
-                context->createRenderTarget(input->imageInfo().makeWH(newW, newH));
-        LOG_ALWAYS_FATAL_IF(!surface, "%s: Failed to create surface for blurring!", __func__);
-        return surface;
+    auto makeImageInfo = [&](float scale) {
+        const SkISize size = levelSize(targetBlurRect, scale);
+        return input->imageInfo().makeWH(size.width(), size.height());
     };
 
-    auto makeImageInfo = [&](float scale) -> SkImageInfo {
-        const int newW =
-                std::max(1, static_cast<int>(static_cast<float>(targetBlurRect.width()) / scale));
-        const int newH =
-                std::max(1, static_cast<int>(static_cast<float>(targetBlurRect.height()) / scale));
-        return input->imageInfo().makeWH(newW, newH);
+    auto makeSurface = [&](float scale) {
+        auto surface = context->createRenderTarget(makeImageInfo(scale));
+        LOG_ALWAYS_FATAL_IF(!surface, "%s: Failed to create surface for blurring!", __func__);
+        return surface;
     };
 
     const bool isProtected = context->supportsProtectedContent();
@@ -277,7 +290,7 @@ sk_sp<SkImage> KawaseBlurDualFilterV2::generateTemporaryImage(SkiaGpuContext* co
         const auto sourceShader =
                 input->makeShader(SkTileMode::kClamp, SkTileMode::kClamp,
                                   SkSamplingOptions(SkFilterMode::kLinear, SkMipmapMode::kNone));
-        blurInto(surfaces[0], std::move(sourceShader), targetBlurRect, blurMatrix,
+        blurInto(surfaces[0], imageInfos[0].dimensions(), std::move(sourceShader), targetBlurRect, blurMatrix,
                  usesPreallocatedTextures,
                  0, // unused blur radius. The blur effect hardcodes the radius.
                  1.0f, mQuarterResDownSampleBlurEffect);
@@ -285,14 +298,14 @@ sk_sp<SkImage> KawaseBlurDualFilterV2::generateTemporaryImage(SkiaGpuContext* co
 
     // Next the remaining downscale blur passes.
     for (int i = 0; i < filterPasses; i++) {
-        blurInto(surfaces[i + 1], imageInfos[i + 1].width(), surfaces[i]->makeTemporaryImage(),
+        blurInto(surfaces[i + 1], imageInfos[i + 1].dimensions(), surfaces[i]->makeTemporaryImage(),
                  imageInfos[i].bounds(), usesPreallocatedTextures,
                  0, // unused blur radius. The blur effect hardcodes the radius.
                  1.0f, mHalfResDownSampleBlurEffect);
     }
     // Finally blur+upscale back to our original size.
     for (int i = filterPasses - 1; i >= 0; i--) {
-        blurInto(surfaces[i], imageInfos[i].width(), surfaces[i + 1]->makeTemporaryImage(),
+        blurInto(surfaces[i], imageInfos[i].dimensions(), surfaces[i + 1]->makeTemporaryImage(),
                  imageInfos[i + 1].bounds(), usesPreallocatedTextures, step,
                  std::min(1.0f, filterDepth - i), mUpSampleBlurEffect);
     }

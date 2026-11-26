@@ -205,13 +205,10 @@ AHardwareBuffer* ASurfaceTexture_dequeueBuffer(
         HdrMetadata metadata;
         buffer = st->consumer->dequeueBuffer(outSlotid, outDataspace, &metadata, outTransformMatrix,
                                              outTransform, &queueEmpty, createFence, fenceWait,
-                                             handle, currentCrop);
+                                             handle, currentCrop, outNewContent);
         *outHdrType = static_cast<AHdrMetadataType>(metadata.validTypes);
         *outCta861_3 = metadata.cta8613;
         *outSmpte2086 = metadata.smpte2086;
-        if (!queueEmpty) {
-            *outNewContent = true;
-        }
     } while (buffer.get() && (!queueEmpty));
     AHardwareBuffer* result = nullptr;
     if (buffer.get()) {

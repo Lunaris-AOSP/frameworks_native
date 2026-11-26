@@ -48,6 +48,7 @@ sp<GraphicBuffer> ImageConsumer::dequeueBuffer(int* outSlotid, android_dataspace
             if (slot != BufferItem::INVALID_BUFFER_SLOT) {
                 *outQueueEmpty = true;
                 *outDataspace = st.mCurrentDataSpace;
+                *outHdrMetadata = st.mCurrentHdrMetadata;
                 *outSlotid = slot;
                 return st.mSlots[slot].mGraphicBuffer;
             }
@@ -79,8 +80,9 @@ sp<GraphicBuffer> ImageConsumer::dequeueBuffer(int* outSlotid, android_dataspace
         // accessing the buffer before the outstanding accesses have completed.
         int releaseFenceId = -1;
         EGLDisplay display = EGL_NO_DISPLAY;
-        err = createFence(st.mUseFenceSync, &mImageSlots[slot].eglFence(), &display,
-                          &releaseFenceId, fencePassThroughHandle);
+        EGLSyncKHR& previousFence = mImageSlots[st.mCurrentTexture].eglFence();
+        err = createFence(st.mUseFenceSync, &previousFence, &display, &releaseFenceId,
+                          fencePassThroughHandle);
         if (OK != err) {
             st.releaseBufferLocked(slot, st.mSlots[slot].mGraphicBuffer);
             return nullptr;
@@ -100,7 +102,6 @@ sp<GraphicBuffer> ImageConsumer::dequeueBuffer(int* outSlotid, android_dataspace
 
         // Finally release the old buffer.
 #if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(BQ_GL_FENCE_CLEANUP)
-        EGLSyncKHR previousFence = mImageSlots[st.mCurrentTexture].eglFence();
         if (previousFence != EGL_NO_SYNC_KHR) {
             // Most platforms will be using native fences, so it's unlikely that we'll ever have to
             // process an eglFence. Ideally we can remove this code eventually. In the mean time, do
@@ -111,12 +112,14 @@ sp<GraphicBuffer> ImageConsumer::dequeueBuffer(int* outSlotid, android_dataspace
             // shown up on the GPU yet.
             EGLint result = eglClientWaitSyncKHR(display, previousFence,
                                                  EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, 1000000000);
-            if (result == EGL_FALSE) {
-                IMG_LOGE("dequeueBuffer: error %#x waiting for fence", eglGetError());
-            } else if (result == EGL_TIMEOUT_EXPIRED_KHR) {
-                IMG_LOGE("dequeueBuffer: timeout waiting for fence");
+            if (result != EGL_CONDITION_SATISFIED_KHR) {
+                IMG_LOGE("dequeueBuffer: release fence wait returned %#x (EGL error %#x)",
+                         result, eglGetError());
+                st.releaseBufferLocked(slot, st.mSlots[slot].mGraphicBuffer);
+                return nullptr;
             }
             eglDestroySyncKHR(display, previousFence);
+            previousFence = EGL_NO_SYNC_KHR;
         }
 
         status_t status = st.releaseBufferLocked(st.mCurrentTexture,
@@ -125,7 +128,7 @@ sp<GraphicBuffer> ImageConsumer::dequeueBuffer(int* outSlotid, android_dataspace
         status_t status =
                 st.releaseBufferLocked(st.mCurrentTexture,
                                        st.mSlots[st.mCurrentTexture].mGraphicBuffer, display,
-                                       mImageSlots[st.mCurrentTexture].eglFence());
+                                       previousFence);
 #endif
         if (status < NO_ERROR) {
             IMG_LOGE("dequeueImage: failed to release buffer: %s (%d)", strerror(-status), status);
@@ -141,6 +144,7 @@ sp<GraphicBuffer> ImageConsumer::dequeueBuffer(int* outSlotid, android_dataspace
     st.mCurrentScalingMode = item.mScalingMode;
     st.mCurrentTimestamp = item.mTimestamp;
     st.mCurrentDataSpace = item.mDataSpace;
+    st.mCurrentHdrMetadata = item.mHdrMetadata;
     st.mCurrentFence = item.mFence;
     st.mCurrentFenceTime = item.mFenceTime;
     st.mCurrentFrameNumber = item.mFrameNumber;

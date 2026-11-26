@@ -284,6 +284,13 @@ public:
                                     SurfaceTexture_createReleaseFence createFence,
                                     SurfaceTexture_fenceWait fenceWait,
                                     void* fencePassThroughHandle, ARect* currentCrop);
+    sp<GraphicBuffer> dequeueBuffer(int* outSlotid, android_dataspace* outDataspace,
+                                    HdrMetadata* outHdrMetadata, float* outTransformMatrix,
+                                    uint32_t* outTransform, bool* outQueueEmpty,
+                                    SurfaceTexture_createReleaseFence createFence,
+                                    SurfaceTexture_fenceWait fenceWait,
+                                    void* fencePassThroughHandle, ARect* currentCrop,
+                                    bool* outNewContent);
 
     /**
      * takeConsumerOwnership attaches a SurfaceTexture that is currently in the
@@ -422,6 +429,7 @@ protected:
      * gets set each time updateTexImage is called.
      */
     android_dataspace mCurrentDataSpace;
+    HdrMetadata mCurrentHdrMetadata;
 
     /**
      * mCurrentFrameNumber is the frame counter for the current texture.

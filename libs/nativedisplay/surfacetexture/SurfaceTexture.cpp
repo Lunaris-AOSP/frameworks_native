@@ -505,6 +505,19 @@ sp<GraphicBuffer> SurfaceTexture::dequeueBuffer(int* outSlotid, android_dataspac
                                                 SurfaceTexture_createReleaseFence createFence,
                                                 SurfaceTexture_fenceWait fenceWait,
                                                 void* fencePassThroughHandle, ARect* currentCrop) {
+    return dequeueBuffer(outSlotid, outDataspace, outHdrMetadata, outTransformMatrix, outTransform,
+                         outQueueEmpty, createFence, fenceWait, fencePassThroughHandle, currentCrop,
+                         nullptr);
+}
+
+sp<GraphicBuffer> SurfaceTexture::dequeueBuffer(int* outSlotid, android_dataspace* outDataspace,
+                                                HdrMetadata* outHdrMetadata,
+                                                float* outTransformMatrix, uint32_t* outTransform,
+                                                bool* outQueueEmpty,
+                                                SurfaceTexture_createReleaseFence createFence,
+                                                SurfaceTexture_fenceWait fenceWait,
+                                                void* fencePassThroughHandle, ARect* currentCrop,
+                                                bool* outNewContent) {
     Mutex::Autolock _l(mMutex);
     sp<GraphicBuffer> buffer;
 
@@ -518,8 +531,12 @@ sp<GraphicBuffer> SurfaceTexture::dequeueBuffer(int* outSlotid, android_dataspac
         return buffer;
     }
 
+    const auto previousFrame = mCurrentFrameNumber;
     buffer = mImageConsumer.dequeueBuffer(outSlotid, outDataspace, outHdrMetadata, outQueueEmpty,
                                           *this, createFence, fenceWait, fencePassThroughHandle);
+    if (outNewContent && buffer && previousFrame != mCurrentFrameNumber) {
+        *outNewContent = true;
+    }
     memcpy(outTransformMatrix, mCurrentTransformMatrix, sizeof(mCurrentTransformMatrix));
     *outTransform = mCurrentTransform;
     *currentCrop = mCurrentCrop;

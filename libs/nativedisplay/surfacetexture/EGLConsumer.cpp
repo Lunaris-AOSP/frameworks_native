@@ -166,6 +166,7 @@ status_t EGLConsumer::releaseTexImage(SurfaceTexture& st) {
         st.mCurrentTransform = 0;
         st.mCurrentTimestamp = 0;
         st.mCurrentDataSpace = HAL_DATASPACE_UNKNOWN;
+        st.mCurrentHdrMetadata = {};
         st.mCurrentFence = Fence::NO_FENCE;
         st.mCurrentFenceTime = FenceTime::NO_FENCE;
 
@@ -317,6 +318,7 @@ status_t EGLConsumer::updateAndReleaseLocked(const BufferItem& item, PendingRele
     st.mCurrentScalingMode = item.mScalingMode;
     st.mCurrentTimestamp = item.mTimestamp;
     st.mCurrentDataSpace = item.mDataSpace;
+    st.mCurrentHdrMetadata = item.mHdrMetadata;
     st.mCurrentFence = item.mFence;
     st.mCurrentFenceTime = item.mFenceTime;
     st.mCurrentFrameNumber = item.mFrameNumber;
